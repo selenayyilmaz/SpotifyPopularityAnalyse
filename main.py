@@ -1,19 +1,28 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import RandomForestRegressor
+from xgboost import XGBRegressor
 from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
 import kagglehub
 import seaborn as sns
 from sklearn.metrics import mean_squared_error, r2_score
 import matplotlib.pyplot as plt
+
+
 
 @st.cache_resource
 def load_all_data():
     path = kagglehub.dataset_download("yamaerenay/spotify-dataset-19212020-600k-tracks")
     df = pd.read_csv(f"{path}/tracks.csv")
 
-    features = ['danceability', 'energy', 'tempo', 'acousticness', 'loudness', 'valence']
+    df['track_age'] = 2024 - pd.to_datetime(df['release_date'], errors='coerce').dt.year
+    df['loudness_energy'] = df['loudness'] * df['energy']
+    df['dance_valence'] = df['danceability'] * df['valence']
+
+    features = ['danceability', 'energy', 'tempo', 'acousticness',
+            'loudness', 'valence', 'track_age',
+            'loudness_energy', 'dance_valence']
     df_clean = df[features + ['popularity', 'name', 'artists', 'id']].dropna()
 
     X = df_clean[features]
@@ -22,18 +31,31 @@ def load_all_data():
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
-    model = RandomForestRegressor(n_estimators=50, max_depth=10, n_jobs=-1, random_state=42)
-    model.fit(X_scaled, y)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_scaled, y, test_size=0.2, random_state=42
+    )
 
-    return model, scaler, df_clean
+    model = XGBRegressor(
+        n_estimators=300,
+        max_depth=6,
+        learning_rate=0.05,
+        subsample=0.8,
+        random_state=42,
+        n_jobs=-1
+    )
+    model.fit(X_train, y_train)
+    feature_importance = pd.Series(model.feature_importances_, index=features).sort_values(ascending=False)
+    print(feature_importance)
+
+    return model, scaler, df_clean, X_test, y_test, features
 
 
 with st.spinner("Devasa veri seti analiz ediliyor..."):
-    model, scaler, df_all = load_all_data()
+    model, scaler, df_all, X_test, y_test, features = load_all_data()
 
-st.title("🎵 Gelişmiş Spotify Popülerlik Analiz Paneli")
+st.title("Gelişmiş Spotify Popülerlik Analiz Paneli")
 
-st.sidebar.header("🔎 Şarkı Seçim Yöntemi")
+st.sidebar.header("Şarkı Seçim Yöntemi")
 choice = st.sidebar.radio("Bir yöntem seçin:",
                           ["Şarkı Listesinden Seç", "Rastgele Şarkı Getir", "Kendi Değerlerimi Gireceğim"])
 
@@ -52,7 +74,7 @@ if choice == "Şarkı Listesinden Seç":
         st.sidebar.warning("Şarkı bulunamadı.")
 
 elif choice == "Rastgele Şarkı Getir":
-    if st.sidebar.button("Zarı At! (Yeni Şarkı Getir)"):
+    if st.sidebar.button("Yeni Bir Şarkı İçin Zarı At"):
         selected_song = df_all.sample(1).iloc[0]
     else:
         st.sidebar.info("Butona basarak rastgele bir şarkı çekebilirsiniz.")
@@ -63,7 +85,7 @@ if selected_song is not None or choice == "Kendi Değerlerimi Gireceğim":
     col1, col2 = st.columns([1, 1])
 
     with col1:
-        st.subheader("📊 Şarkı Özellikleri")
+        st.subheader("Şarkı Özellikleri")
         if choice != "Kendi Değerlerimi Gireceğim":
             st.markdown(f"**Seçilen Şarkı:** {selected_song['name']}")
             st.markdown(f"**Sanatçı:** {selected_song['artists']}")
@@ -78,13 +100,17 @@ if selected_song is not None or choice == "Kendi Değerlerimi Gireceğim":
             a = st.slider("Acousticness", 0.0, 1.0, 0.2)
             l = st.slider("Loudness", -60, 0, -10)
             v = st.slider("Valence", 0.0, 1.0, 0.5)
-            manual_vals = [d, e, t, a, l, v]
+            track_age = st.slider("Şarkı Yaşı (Track Age)", 0, 100, 5)
+
+            loudness_energy = l * e
+            dance_valence = d * v
+            manual_vals = [d, e, t, a, l, v, track_age, loudness_energy, dance_valence]
 
     with col2:
-        st.subheader("🔮 Yapay Zeka Tahmini")
+        st.subheader("Yapay Zeka Tahmini")
 
         if choice != "Kendi Değerlerimi Gireceğim":
-            input_data = selected_song[features_list].values.reshape(1, -1)
+            input_data = selected_song[features].values.reshape(1, -1)
             actual_pop = selected_song['popularity']
         else:
             input_data = np.array(manual_vals).reshape(1, -1)
@@ -113,21 +139,18 @@ else:
 #######################
 
 st.divider()
-st.header("📈 Veri Seti Analizi ve Model Performansı")
+st.header("Veri Seti Analizi ve Model Performansı")
 
-X_tum_veri = df_all[['danceability', 'energy', 'tempo', 'acousticness', 'loudness', 'valence']]
-y_tum_veri = df_all['popularity']
-X_scaled_tum = scaler.transform(X_tum_veri)
+y_pred_rf = model.predict(X_test)
+rf_r2 = r2_score(y_test, y_pred_rf)
+rf_rmse = np.sqrt(mean_squared_error(y_test, y_pred_rf))
 
-y_pred_rf = model.predict(X_scaled_tum)
-rf_r2 = r2_score(y_tum_veri, y_pred_rf)
-rf_rmse = np.sqrt(mean_squared_error(y_tum_veri, y_pred_rf))
-
-st.subheader("Model Başarı Metrikleri (Random Forest)")
+st.subheader("Model Başarı Metrikleri (XGBoost)")
 col_m1, col_m2 = st.columns(2)
 col_m1.metric("R² Skoru (Belirlenim Katsayısı)", f"{rf_r2:.4f}")
 col_m2.metric("RMSE (Hata Payı)", f"{rf_rmse:.2f}")
-
+print(f"R²: {rf_r2:.4f}")
+print(f"RMSE: {rf_rmse:.2f}")
 st.write("---")
 
 col_graph1, col_graph2 = st.columns(2)
@@ -135,7 +158,9 @@ col_graph1, col_graph2 = st.columns(2)
 with col_graph1:
     st.subheader("Korelasyon Isı Haritası")
     fig_corr, ax_corr = plt.subplots(figsize=(8, 6))
-    corr_matrix = df_all[['danceability', 'energy', 'tempo', 'acousticness', 'loudness', 'valence', 'popularity']].corr()
+    corr_matrix = df_all[['danceability', 'energy', 'tempo', 'acousticness',
+                       'loudness', 'valence', 'track_age',
+                       'loudness_energy', 'dance_valence', 'popularity']].corr()
     sns.heatmap(corr_matrix, annot=True, cmap="coolwarm", fmt=".2f", linewidths=0.5, ax=ax_corr)
     st.pyplot(fig_corr)
 
